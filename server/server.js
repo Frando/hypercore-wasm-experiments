@@ -16,7 +16,7 @@ feed.ready(() => {
   console.log('key', feed.key.toString('hex'))
   // feed.append(['foo', 'bar'])
   // Append the README, splitted by lines.
-  const filename = p.join(__dirname, '..', '..', 'README.md')
+  const filename = p.join(__dirname, '..', 'README.md')
   pipeline(
     fs.createReadStream(filename),
     split(),

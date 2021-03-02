@@ -1,11 +1,9 @@
-use async_trait::async_trait;
 use futures::channel::mpsc::{UnboundedReceiver as Receiver, UnboundedSender as Sender};
 use futures::io::AsyncWrite;
 use futures::lock::Mutex;
 use futures::stream::{StreamExt, TryStreamExt};
-use hypercore_protocol::schema::*;
-use hypercore_protocol::{discovery_key, ProtocolBuilder};
-use hypercore_protocol::{Channel, ChannelHandler, StreamContext, StreamHandler};
+use hypercore_protocol::{discovery_key, Channel, Event, ProtocolBuilder};
+use hypercore_protocol::{schema::*, Message};
 use log::*;
 use pretty_hash::fmt as pretty_fmt;
 use std::collections::HashMap;
@@ -15,6 +13,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::spawn_local;
 
 struct Writer(Sender<Vec<u8>>);
 impl AsyncWrite for Writer {
@@ -55,12 +54,45 @@ pub async fn open(
     let reader = recv.into_async_read();
     let writer = Writer(send);
 
-    let mut protocol = ProtocolBuilder::new(is_initiator)
-        .set_handlers(feedstore)
-        .from_rw(reader, writer);
+    let mut protocol = ProtocolBuilder::new(is_initiator).connect_rw(reader, writer);
 
-    let result = protocol.listen().await;
-    debug!("RESULT: {:?}", result);
+    while let Some(event) = protocol.next().await {
+        let event = event.expect("Protocol error");
+        match event {
+            Event::Handshake(_remote_public_key) => {
+                debug!("Handshake from remote");
+            }
+            Event::DiscoveryKey(discovery_key) => {
+                if let Some(feed) = feedstore.get(&discovery_key) {
+                    debug!(
+                        "open discovery_key: {}",
+                        pretty_fmt(&discovery_key).unwrap()
+                    );
+                    protocol.open(feed.key.clone()).await.unwrap();
+                } else {
+                    debug!(
+                        "unknown discovery_key: {}",
+                        pretty_fmt(&discovery_key).unwrap()
+                    );
+                }
+            }
+            Event::Channel(mut channel) => {
+                if let Some(feed) = feedstore.get(channel.discovery_key()) {
+                    let feed = feed.clone();
+                    feed.on_open(&mut channel).await.unwrap();
+                    spawn_local(async move {
+                        while let Some(message) = channel.next().await {
+                            feed.on_message(&mut channel, message).await.unwrap();
+                        }
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // let result = protocol.listen().await;
+    // debug!("RESULT: {:?}", result);
     Ok(JsValue::null())
 }
 
@@ -84,23 +116,6 @@ impl FeedStore {
     }
 }
 
-/// We implement the StreamHandler trait on the FeedStore.
-#[async_trait]
-impl StreamHandler for FeedStore {
-    async fn on_discoverykey(
-        &self,
-        protocol: &mut StreamContext,
-        discovery_key: &[u8],
-    ) -> io::Result<()> {
-        log::trace!("open discovery_key: {}", pretty_fmt(discovery_key).unwrap());
-        if let Some(feed) = self.get(discovery_key) {
-            protocol.open(feed.key.clone(), feed.clone()).await
-        } else {
-            Ok(())
-        }
-    }
-}
-
 /// A Feed is a single unit of replication, an append-only log.
 /// This toy feed can only read sequentially and does not save or buffer anything.
 #[derive(Debug)]
@@ -117,17 +132,20 @@ impl Feed {
             state: Mutex::new(FeedState::default()),
         }
     }
-}
+    async fn on_message(&self, channel: &mut Channel, message: Message) -> io::Result<()> {
+        debug!("receive message: {:?}", message);
+        match message {
+            Message::Have(message) => self.on_have(channel, message).await,
+            Message::Data(message) => self.on_data(channel, message).await,
+            _ => Ok(()),
+        }
+    }
 
-/// The Feed structs implements the ChannelHandler trait.
-/// This allows to pass a Feed struct into the protocol when `open`ing a channel,
-/// making it the handler for all messages that arrive on this channel.
-/// The trait fns all receive a `channel` arg that allows to send messages over
-/// the current channel.
-#[async_trait]
-impl ChannelHandler for Feed {
-    async fn on_open<'a>(&self, channel: &mut Channel<'a>, discovery_key: &[u8]) -> io::Result<()> {
-        log::info!("open channel {}", pretty_fmt(&discovery_key).unwrap());
+    async fn on_open(&self, channel: &mut Channel) -> io::Result<()> {
+        log::info!(
+            "open channel {}",
+            pretty_fmt(channel.discovery_key()).unwrap()
+        );
         let msg = Want {
             start: 0,
             length: None,
@@ -135,7 +153,7 @@ impl ChannelHandler for Feed {
         channel.want(msg).await
     }
 
-    async fn on_have<'a>(&self, channel: &mut Channel<'a>, msg: Have) -> io::Result<()> {
+    async fn on_have(&self, channel: &mut Channel, msg: Have) -> io::Result<()> {
         let mut state = self.state.lock().await;
         // Check if the remote announces a new head.
         log::info!("receive have: {} (state {})", msg.start, state.remote_head);
@@ -157,7 +175,7 @@ impl ChannelHandler for Feed {
         Ok(())
     }
 
-    async fn on_data<'a>(&self, channel: &mut Channel<'a>, msg: Data) -> io::Result<()> {
+    async fn on_data(&self, channel: &mut Channel, msg: Data) -> io::Result<()> {
         let state = self.state.lock().await;
         log::info!(
             "receive data: idx {}, {} bytes (remote_head {})",

@@ -1,0 +1,47 @@
+[package]
+name = "hypercore-rs-wasm"
+version = "0.1.0"
+authors = ["Franz Heinzmann (Frando) <frando@unbiskant.org>"]
+edition = "2018"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+# hypercore-protocol = { path = "..", features = ["wasm-bindgen"] }
+hypercore-protocol = { git = "https://github.com/datrs/hypercore-protocol-rs.git", rev = "3186877a888c75fc99cee69588cc313fda9f5db5" }
+console_error_panic_hook = { version = "0.1.1", optional = true }
+wee_alloc = { version = "0.4.2", optional = true }
+wasm-bindgen-futures = "0.4.10"
+futures = "0.3.4"
+async-trait = "0.1.27"
+pretty-hash = "0.4.1"
+log = "0.4.8"
+hex = "0.4.2"
+console_log = "0.1.2"
+js-sys = "0.3.37"
+
+# We don't depend on this directly but specify it here to enable the required wasm-bindgen feature
+# getrandom = { version = "0.1", features = ["wasm-bindgen"] }
+# futures-timer = { version = "3.0", features = ["wasm-bindgen"] }
+
+[dependencies.web-sys]
+version = "0.3"
+features = [
+  "BinaryType",
+  "ErrorEvent",
+  "MessageEvent",
+  "WebSocket",
+]
+
+[dev-dependencies]
+wasm-bindgen-test = "0.2"
+
+[profile.release]
+# Tell `rustc` to optimize for small code size.
+opt-level = "s"
+lto = true

@@ -11,7 +11,7 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-wasm-bindgen = "0.2"
+wasm-bindgen = "0.2.71"
 # hypercore-protocol = { path = "..", features = ["wasm-bindgen"] }
 hypercore-protocol = { git = "https://github.com/datrs/hypercore-protocol-rs.git", branch = "reduce-async", features = ["wasm-bindgen"]}
 console_error_panic_hook = { version = "0.1.1", optional = true }
@@ -33,10 +33,15 @@ futures = "0.3.13"
 [dependencies.web-sys]
 version = "0.3"
 features = [
+  "HtmlElement",
   "BinaryType",
   "ErrorEvent",
   "MessageEvent",
   "WebSocket",
+  "Document",
+  "Window",
+  "Element",
+  "ElementCreationOptions"
 ]
 
 [dev-dependencies]

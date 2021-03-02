@@ -1,6 +1,7 @@
 use futures::channel::mpsc::{UnboundedReceiver as Receiver, UnboundedSender as Sender};
 use futures::io::AsyncWrite;
 use futures::lock::Mutex;
+use futures::sink::SinkExt;
 use futures::stream::{StreamExt, TryStreamExt};
 use hypercore_protocol::{discovery_key, Channel, Event, ProtocolBuilder};
 use hypercore_protocol::{schema::*, Message};
@@ -14,6 +15,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
+
+use crate::AppEvent;
 
 struct Writer(Sender<Vec<u8>>);
 impl AsyncWrite for Writer {
@@ -37,6 +40,7 @@ impl AsyncWrite for Writer {
 pub async fn open(
     recv: Receiver<Vec<u8>>,
     send: Sender<Vec<u8>>,
+    app_tx: Sender<AppEvent>,
     key: impl ToString,
 ) -> std::result::Result<JsValue, JsValue> {
     let is_initiator = true;
@@ -56,40 +60,45 @@ pub async fn open(
 
     let mut protocol = ProtocolBuilder::new(is_initiator).connect_rw(reader, writer);
 
-    while let Some(event) = protocol.next().await {
-        let event = event.expect("Protocol error");
-        match event {
-            Event::Handshake(_remote_public_key) => {
-                debug!("Handshake from remote");
-            }
-            Event::DiscoveryKey(discovery_key) => {
-                if let Some(feed) = feedstore.get(&discovery_key) {
-                    debug!(
-                        "open discovery_key: {}",
-                        pretty_fmt(&discovery_key).unwrap()
-                    );
-                    protocol.open(feed.key.clone()).await.unwrap();
-                } else {
-                    debug!(
-                        "unknown discovery_key: {}",
-                        pretty_fmt(&discovery_key).unwrap()
-                    );
+    spawn_local(async move {
+        while let Some(event) = protocol.next().await {
+            let event = event.expect("Protocol error");
+            match event {
+                Event::Handshake(_remote_public_key) => {
+                    debug!("Handshake from remote");
                 }
-            }
-            Event::Channel(mut channel) => {
-                if let Some(feed) = feedstore.get(channel.discovery_key()) {
-                    let feed = feed.clone();
-                    feed.on_open(&mut channel).await.unwrap();
-                    spawn_local(async move {
-                        while let Some(message) = channel.next().await {
-                            feed.on_message(&mut channel, message).await.unwrap();
-                        }
-                    });
+                Event::DiscoveryKey(discovery_key) => {
+                    if let Some(feed) = feedstore.get(&discovery_key) {
+                        debug!(
+                            "open discovery_key: {}",
+                            pretty_fmt(&discovery_key).unwrap()
+                        );
+                        protocol.open(feed.key.clone()).await.unwrap();
+                    } else {
+                        debug!(
+                            "unknown discovery_key: {}",
+                            pretty_fmt(&discovery_key).unwrap()
+                        );
+                    }
                 }
+                Event::Channel(mut channel) => {
+                    if let Some(feed) = feedstore.get(channel.discovery_key()) {
+                        let feed = feed.clone();
+                        let app_tx = app_tx.clone();
+                        feed.on_open(&mut channel).await.unwrap();
+                        spawn_local(async move {
+                            while let Some(message) = channel.next().await {
+                                feed.on_message(&mut channel, message, app_tx.clone())
+                                    .await
+                                    .unwrap();
+                            }
+                        });
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
-    }
+    });
 
     // let result = protocol.listen().await;
     // debug!("RESULT: {:?}", result);
@@ -132,11 +141,16 @@ impl Feed {
             state: Mutex::new(FeedState::default()),
         }
     }
-    async fn on_message(&self, channel: &mut Channel, message: Message) -> io::Result<()> {
+    async fn on_message(
+        &self,
+        channel: &mut Channel,
+        message: Message,
+        app_tx: Sender<AppEvent>,
+    ) -> io::Result<()> {
         debug!("receive message: {:?}", message);
         match message {
             Message::Have(message) => self.on_have(channel, message).await,
-            Message::Data(message) => self.on_data(channel, message).await,
+            Message::Data(message) => self.on_data(channel, message, app_tx).await,
             _ => Ok(()),
         }
     }
@@ -175,8 +189,13 @@ impl Feed {
         Ok(())
     }
 
-    async fn on_data(&self, channel: &mut Channel, msg: Data) -> io::Result<()> {
-        let state = self.state.lock().await;
+    async fn on_data(
+        &self,
+        channel: &mut Channel,
+        msg: Data,
+        mut app_tx: Sender<AppEvent>,
+    ) -> io::Result<()> {
+        let mut state = self.state.lock().await;
         log::info!(
             "receive data: idx {}, {} bytes (remote_head {})",
             msg.index,
@@ -184,8 +203,9 @@ impl Feed {
             state.remote_head
         );
 
-        if let Some(value) = msg.value {
-            debug!("receive data: {:?}", String::from_utf8(value));
+        if let Some(value) = msg.value.clone() {
+            debug!("receive data: {:?}", String::from_utf8(value.clone()));
+            state.data.insert(msg.index, value);
         }
 
         let next = msg.index + 1;
@@ -198,6 +218,13 @@ impl Feed {
                 nodes: None,
             };
             channel.request(msg).await?;
+        } else {
+            let text = state
+                .data
+                .values()
+                .map(|b| String::from_utf8(b.to_vec()).unwrap())
+                .collect::<String>();
+            app_tx.send(AppEvent::ContentLoaded(text)).await.unwrap();
         }
 
         Ok(())
@@ -208,14 +235,16 @@ impl Feed {
 /// This would have a bitfield to support sparse sync in the actual impl.
 #[derive(Debug)]
 struct FeedState {
-    remote_head: u64,
-    started: bool,
+    pub remote_head: u64,
+    pub started: bool,
+    pub data: HashMap<u64, Vec<u8>>,
 }
 impl Default for FeedState {
     fn default() -> Self {
         FeedState {
             remote_head: 0,
             started: false,
+            data: HashMap::new(),
         }
     }
 }

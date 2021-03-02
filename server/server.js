@@ -14,12 +14,11 @@ const PORT = 9000
 const feed = hypercore(ram)
 feed.ready(() => {
   console.log('key', feed.key.toString('hex'))
-  // feed.append(['foo', 'bar'])
-  // Append the README, splitted by lines.
+  // Append the README.
   const filename = p.join(__dirname, '..', 'README.md')
   pipeline(
     fs.createReadStream(filename),
-    split(),
+    // split(),
     feed.createWriteStream(),
     err => {
       if (err) console.error('error importing file', err)

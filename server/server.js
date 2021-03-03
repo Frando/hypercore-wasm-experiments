@@ -18,7 +18,7 @@ feed.ready(() => {
   const filename = p.join(__dirname, '..', 'README.md')
   pipeline(
     fs.createReadStream(filename),
-    // split(),
+    split(line => line + '\n'),
     feed.createWriteStream(),
     err => {
       if (err) console.error('error importing file', err)

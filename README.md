@@ -26,6 +26,7 @@ A Node.js server has the simple demo backend:
 ## How to run
 
 ```bash
+cargo build
 wasm-pack build --dev --target web
 cd server
 yarn

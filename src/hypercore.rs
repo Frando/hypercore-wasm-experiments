@@ -3,10 +3,11 @@ use futures::lock::Mutex;
 use futures::sink::SinkExt;
 use futures::stream::StreamExt;
 use hypercore_protocol::schema::*;
-use hypercore_protocol::{discovery_key, Channel, Event, Message, Protocol};
+use hypercore_protocol::{discovery_key, Channel, Duplex, Event, Message, Protocol};
 use log::*;
 use pretty_hash::fmt as pretty_fmt;
 use std::collections::{BTreeMap, HashMap};
+use std::convert::TryInto;
 use std::io;
 use std::sync::Arc;
 use wasm_bindgen_futures::spawn_local;
@@ -14,13 +15,22 @@ use wasm_bindgen_futures::spawn_local;
 use crate::ws::{ReadHalf, WriteHalf};
 use crate::AppEvent;
 
+fn parse_key_from_string(key: &str) -> anyhow::Result<[u8; 32]> {
+    let key = hex::decode(key.as_bytes())?;
+    let key = key
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Invalid key length"))?;
+    Ok(key)
+}
+
 pub async fn replicate(
-    mut protocol: Protocol<ReadHalf, WriteHalf>,
+    mut protocol: Protocol<Duplex<ReadHalf, WriteHalf>>,
     key: impl AsRef<str>,
     app_tx: Sender<AppEvent>,
-) -> io::Result<()> {
+) -> anyhow::Result<()> {
     let mut feedstore = FeedStore::new();
-    feedstore.add(Feed::new(hex::decode(key.as_ref().as_bytes()).unwrap()));
+    let key = parse_key_from_string(key.as_ref())?;
+    feedstore.add(Feed::new(key));
     let feedstore = Arc::new(feedstore);
 
     while let Some(event) = protocol.next().await {
@@ -35,7 +45,7 @@ pub async fn replicate(
                         "open discovery_key: {}",
                         pretty_fmt(&discovery_key).unwrap()
                     );
-                    protocol.open(feed.key.clone()).await.unwrap();
+                    protocol.open(feed.key).await.unwrap();
                 } else {
                     debug!(
                         "unknown discovery_key: {}",
@@ -87,12 +97,12 @@ impl FeedStore {
 /// This toy feed can only read sequentially and does not save or buffer anything.
 #[derive(Debug)]
 struct Feed {
-    key: Vec<u8>,
-    discovery_key: Vec<u8>,
+    key: [u8; 32],
+    discovery_key: [u8; 32],
     state: Mutex<FeedState>,
 }
 impl Feed {
-    pub fn new(key: Vec<u8>) -> Self {
+    pub fn new(key: [u8; 32]) -> Self {
         Feed {
             discovery_key: discovery_key(&key),
             key,

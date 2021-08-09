@@ -13,7 +13,7 @@ default = ["console_error_panic_hook"]
 [dependencies]
 wasm-bindgen = "0.2.71"
 # hypercore-protocol = { path = "..", features = ["wasm-bindgen"] }
-hypercore-protocol = { git = "https://github.com/datrs/hypercore-protocol-rs.git", branch = "master", features = ["wasm-bindgen"]}
+hypercore-protocol = { version = "0.3.1", features = ["wasm-bindgen"]}
 console_error_panic_hook = { version = "0.1.1", optional = true }
 wee_alloc = { version = "0.4.2", optional = true }
 wasm-bindgen-futures = "0.4.10"
